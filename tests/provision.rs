@@ -92,6 +92,58 @@ fn write_zip(path: &Path, entries: &[Entry]) {
     zip.finish().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn zip_extraction_strips_privileged_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("zip-privileged-mode");
+    let archive = dir.join("jdk.zip");
+    write_zip(&archive, &[Entry::File("bin/java", b"fixture")]);
+    // Forge Unix external attributes in the central directory. Normal ZIP
+    // writers intentionally do not expose privileged mode bits.
+    let mut bytes = std::fs::read(&archive).unwrap();
+    let central = bytes
+        .windows(4)
+        .position(|bytes| bytes == b"PK\x01\x02")
+        .unwrap();
+    bytes[central + 5] = 3; // version-made-by OS: Unix
+    bytes[central + 38..central + 42].copy_from_slice(&(0o104755u32 << 16).to_le_bytes());
+    std::fs::write(&archive, bytes).unwrap();
+    let out = dir.join("out");
+    extract(&archive, &out).unwrap();
+    let mode = std::fs::metadata(out.join("bin/java"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_extraction_strips_privileged_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("tar-privileged-mode");
+    let archive = dir.join("jdk.tar.gz");
+    let file = std::fs::File::create(&archive).unwrap();
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let mut builder = tar::Builder::new(encoder);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(7);
+    header.set_mode(0o4755);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "bin/java", &b"fixture"[..])
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
+    let out = dir.join("out");
+    extract(&archive, &out).unwrap();
+    let mode = std::fs::metadata(out.join("bin/java"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
 /// The minimum layout `resolve_layout` accepts as a Java home.
 fn jdk_entries(prefix: &str, windows: bool) -> Vec<Entry<'static>> {
     let java: &'static str = Box::leak(

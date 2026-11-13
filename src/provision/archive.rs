@@ -97,7 +97,10 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
             .by_index(i)
             .map_err(|e| Error::UnsupportedArchive(e.to_string()))?;
         let Some(name) = entry.enclosed_name() else {
-            return Err(Error::UnsafeArchiveEntry(entry.name().to_string()));
+            let name = entry
+                .name()
+                .map_err(|error| Error::UnsupportedArchive(error.to_string()))?;
+            return Err(Error::UnsafeArchiveEntry(name.into_owned()));
         };
         let out = safe_join(dest, &name)?;
 
@@ -114,7 +117,8 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))
+            // Archive metadata must not create setuid, setgid, or sticky files.
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o777))
                 .map_err(|e| Error::io(&out, e))?;
         }
     }
@@ -125,7 +129,8 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(archive).map_err(|e| Error::io(archive, e))?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(decoder);
-    tar.set_preserve_permissions(true);
+    // Retain ordinary executable bits without installing privileged mode bits.
+    tar.set_preserve_permissions(false);
 
     for entry in tar.entries().map_err(|e| Error::io(archive, e))? {
         let mut entry = entry.map_err(|e| Error::io(archive, e))?;
